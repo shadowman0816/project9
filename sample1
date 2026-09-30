@@ -1,0 +1,514 @@
+package net.jpmchase.payroll.processor.service.sbp.payroll.handler.credit;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import net.jpmchase.payroll.processor.model.PayrollHierarchy;
+import net.jpmchase.payroll.processor.model.enums.*;
+import net.jpmchase.payroll.processor.service.NotificationEventService;
+import net.jpmchase.payroll.processor.service.sbp.payroll.PayrollPersistenceService;
+import net.jpmchase.payroll.processor.service.sbp.payroll.PayrollRetrievalService;
+import net.jpmchase.payroll.processor.service.sbp.payroll.PayrollStatusUpdateService;
+import net.jpmchase.payroll.processor.service.sbp.payroll.handler.StatusHandler;
+import net.jpmchase.payroll.processor.service.transaction.PayrollUtilityService;
+import org.springframework.stereotype.Component;
+
+import java.math.BigDecimal;
+import java.time.LocalDate;
+import java.util.Locale;
+import java.util.Objects;
+
+import static net.jpmchase.payroll.processor.model.enums.TransactionStatus.PROCESSED;
+import static net.jpmchase.payroll.processor.model.enums.TransactionStatus.REJECTED;
+
+/**
+ * Handler for REJECTED credit transaction status.
+ */
+@Slf4j
+@Component
+@RequiredArgsConstructor
+public class RejectedStatusHandler implements StatusHandler {
+
+    private final PayrollRetrievalService retrievalService;
+    private final PayrollStatusUpdateService statusUpdateService;
+    private final NotificationEventService notificationEventService;
+    private final PayrollUtilityService payrollUtilityService;
+
+    /*
+     * Needed only for the new post-processing override:
+     * PROCESSED -> REJECTED.
+     */
+    private final PayrollPersistenceService payrollPersistenceService;
+
+    @Override
+    public SBPTransactionStatus getStatus() {
+        return SBPTransactionStatus.REJECTED;
+    }
+
+    @Override
+    public void handle(
+            String transactionIdentifier,
+            String payrollTransactionIdentifier,
+            LocalDate procDt) {
+
+        log.info(
+                "Handling {} for transactionId: {}, groupTransactionId: {}, procDt: {}",
+                getStatus(),
+                transactionIdentifier,
+                payrollTransactionIdentifier,
+                procDt);
+
+        retrievalService
+                .getEmployeeTransaction(transactionIdentifier, procDt)
+                .ifPresentOrElse(
+
+                        employeeTransaction -> {
+
+                            if (employeeTransaction
+                                    .getEmpTxnStsCd()
+                                    .equalsIgnoreCase(REJECTED.getCode())) {
+
+                                BigDecimal rejectedAmount =
+                                        employeeTransaction.getTxnAmt();
+
+                                /*
+                                 * =========================================================
+                                 * EXISTING FLOW
+                                 * =========================================================
+                                 *
+                                 * Keep this exactly as it worked before.
+                                 */
+
+                                statusUpdateService.updateEmployeeDisbursementStatus(
+                                        employeeTransaction,
+                                        payrollTransactionIdentifier,
+                                        PaymentType.CHECK,
+                                        PaymentDisbursementStatus.CONVERTED_CHECK,
+                                        REJECTED,
+                                        rejectedAmount);
+
+                                statusUpdateService
+                                        .updatePayrollTransactionIfEmployeeTransactionsAreTerminal(
+                                                employeeTransaction.getPyr1TxnId(),
+                                                PROCESSED,
+                                                rejectedAmount);
+
+                                /*
+                                 * IMPORTANT:
+                                 *
+                                 * Existing behavior remains PROCESSED.
+                                 * Do not put shouldMarkPayrollRejected() here.
+                                 */
+                                statusUpdateService
+                                        .updatePayrollStatusIfAllTransactionsAreTerminal(
+                                                payrollTransactionIdentifier,
+                                                PayrollStatus.PROCESSED,
+                                                rejectedAmount,
+                                                procDt);
+
+                                /*
+                                 * =========================================================
+                                 * NEW FLOW
+                                 * =========================================================
+                                 *
+                                 * Existing processing is completely finished first.
+                                 *
+                                 * Now independently re-read everything and determine
+                                 * whether this payroll qualifies for the new REJECTED
+                                 * business scenario.
+                                 */
+                                markPayrollRejectedIfEligible(
+                                        payrollTransactionIdentifier,
+                                        procDt);
+
+                            } else {
+
+                                log.warn(
+                                        "Employee transaction with transactionId: {}, "
+                                                + "groupTransactionId: {} already in status: {}",
+                                        transactionIdentifier,
+                                        payrollTransactionIdentifier,
+                                        employeeTransaction.getEmpTxnStsCd());
+                            }
+
+                            /*
+                             * Existing notification flow.
+                             */
+                            retrievalService
+                                    .getPayrollBySrcPymtInstrId(
+                                            payrollTransactionIdentifier,
+                                            procDt)
+                                    .ifPresent(payroll -> {
+
+                                        log.info(
+                                                "Notifying customer for risk rejected event "
+                                                        + "for transactionId: {}, "
+                                                        + "groupTransactionId: {}",
+                                                transactionIdentifier,
+                                                payrollTransactionIdentifier);
+
+                                        notificationEventService
+                                                .riskRejectedFundToPayee(
+                                                        payroll,
+                                                        employeeTransaction);
+                                    });
+                        },
+
+                        /*
+                         * Existing transaction-level fallback flow.
+                         */
+                        () -> {
+
+                            log.warn(
+                                    "Employee transaction with transactionId: {}, "
+                                            + "groupTransactionId: {} not found, "
+                                            + "checking transaction level",
+                                    transactionIdentifier,
+                                    payrollTransactionIdentifier);
+
+                            retrievalService
+                                    .getPayrollTransactionBySrcPymtInstrId(
+                                            transactionIdentifier,
+                                            procDt)
+                                    .ifPresentOrElse(
+
+                                            payrollTransaction -> {
+
+                                                statusUpdateService
+                                                        .updatePayrollTransactionStatus(
+                                                                payrollTransaction,
+                                                                REJECTED);
+
+                                                statusUpdateService
+                                                        .updatePayrollStatusIfAllTransactionsAreTerminal(
+                                                                payrollTransactionIdentifier,
+                                                                PayrollStatus.PROCESSED,
+                                                                null,
+                                                                procDt);
+                                            },
+
+                                            () -> retrievalService
+                                                    .logTransactionNotFound(
+                                                            transactionIdentifier,
+                                                            payrollTransactionIdentifier));
+                        });
+    }
+
+    /**
+     * New isolated post-processing logic.
+     *
+     * Existing processing has already completed before we enter this method.
+     *
+     * The payroll is changed from PROCESSED -> REJECTED ONLY when:
+     *
+     * 1. Employee transactions are available.
+     * 2. At least one employee transaction is REJECTED.
+     * 3. Every employee transaction is either REJECTED or EMPLOYER_PAID.
+     * 4. TAX is not present.
+     * 5. GARNISHMENT is not present.
+     *
+     * Any missing/uncertain data results in NO CHANGE to the existing flow.
+     */
+    private void markPayrollRejectedIfEligible(
+            final String groupTransactionId,
+            final LocalDate procDt) {
+
+        retrievalService
+                .getPayrollBySrcPymtInstrId(groupTransactionId, procDt)
+                .ifPresentOrElse(
+
+                        payroll -> {
+
+                            /*
+                             * SAFETY CHECK #1
+                             *
+                             * The existing flow should have completed first.
+                             *
+                             * Only override PROCESSED -> REJECTED.
+                             * Never touch PENDING_REVIEW, IN_PROCESS,
+                             * CANCELLED or any other status.
+                             */
+                            if (!PayrollStatus.PROCESSED
+                                    .getCode()
+                                    .equalsIgnoreCase(payroll.getPyr1StsCd())) {
+
+                                log.info(
+                                        "Rejected payroll post-processing skipped "
+                                                + "for groupTransactionId: {}. "
+                                                + "Current payroll status: {}",
+                                        groupTransactionId,
+                                        payroll.getPyr1StsCd());
+
+                                return;
+                            }
+
+                            /*
+                             * We need a valid source payroll ID before
+                             * retrieving the hierarchy.
+                             */
+                            if (payroll.getId() == null
+                                    || payroll.getId().getSrcPyrId() == null) {
+
+                                log.warn(
+                                        "Rejected payroll post-processing skipped "
+                                                + "for groupTransactionId: {}. "
+                                                + "Source payroll ID is unavailable",
+                                        groupTransactionId);
+
+                                return;
+                            }
+
+                            /*
+                             * Re-read the hierarchy AFTER the old processing
+                             * has completed.
+                             */
+                            PayrollHierarchy hierarchy =
+                                    payrollUtilityService.getPayrollHierarchy(
+                                            payroll.getId().getSrcPyrId(),
+                                            procDt);
+
+                            if (hierarchy == null) {
+
+                                log.warn(
+                                        "Rejected payroll post-processing skipped "
+                                                + "for groupTransactionId: {}. "
+                                                + "Payroll hierarchy is unavailable",
+                                        groupTransactionId);
+
+                                return;
+                            }
+
+                            /*
+                             * -------------------------------------------------
+                             * Employee transaction validation
+                             * -------------------------------------------------
+                             */
+
+                            var employeeTransactions =
+                                    hierarchy.employeeTransactionEntities();
+
+                            if (employeeTransactions == null
+                                    || employeeTransactions.isEmpty()) {
+
+                                log.warn(
+                                        "Rejected payroll post-processing skipped "
+                                                + "for groupTransactionId: {}. "
+                                                + "No employee transactions found",
+                                        groupTransactionId);
+
+                                return;
+                            }
+
+                            /*
+                             * At least one transaction must actually be REJECTED.
+                             *
+                             * This prevents a payroll containing only
+                             * EMPLOYER_PAID transactions from becoming REJECTED.
+                             */
+                            boolean hasRejectedEmployee =
+                                    employeeTransactions.stream()
+                                            .filter(Objects::nonNull)
+                                            .anyMatch(employeeTransaction ->
+                                                    REJECTED.getCode()
+                                                            .equalsIgnoreCase(
+                                                                    employeeTransaction
+                                                                            .getEmpTxnStsCd()));
+
+                            /*
+                             * Every employee transaction must be:
+                             *
+                             * REJECTED
+                             *      OR
+                             * EMPLOYER_PAID
+                             *
+                             * If even one employee transaction is in another
+                             * status, this is not our new scenario.
+                             */
+                            boolean allRejectedOrEmployerPaid =
+                                    employeeTransactions.stream()
+                                            .allMatch(employeeTransaction -> {
+
+                                                if (employeeTransaction == null
+                                                        || employeeTransaction
+                                                                .getEmpTxnStsCd() == null) {
+                                                    return false;
+                                                }
+
+                                                String status =
+                                                        employeeTransaction
+                                                                .getEmpTxnStsCd();
+
+                                                return REJECTED.getCode()
+                                                                .equalsIgnoreCase(status)
+                                                        || TransactionStatus
+                                                                .EMPLOYER_PAID
+                                                                .getCode()
+                                                                .equalsIgnoreCase(status);
+                                            });
+
+                            /*
+                             * -------------------------------------------------
+                             * TAX / GARNISHMENT validation
+                             * -------------------------------------------------
+                             */
+
+                            var payrollTransactions =
+                                    hierarchy.payrollTransactionEntities();
+
+                            /*
+                             * Null means we do not have enough information.
+                             * Fail safe and leave the old flow untouched.
+                             *
+                             * An empty list is okay -- that means there are
+                             * no TAX/GARNISHMENT transactions in the hierarchy.
+                             */
+                            if (payrollTransactions == null) {
+
+                                log.warn(
+                                        "Rejected payroll post-processing skipped "
+                                                + "for groupTransactionId: {}. "
+                                                + "Payroll transaction hierarchy is unavailable",
+                                        groupTransactionId);
+
+                                return;
+                            }
+
+                            String taxType =
+                                    normalize(TransactionType.TAX.getCode());
+
+                            String garnishmentType =
+                                    normalize(TransactionType.GARNISHMENT.getCode());
+
+                            boolean hasTaxOrGarnishment =
+                                    payrollTransactions.stream()
+                                            .filter(Objects::nonNull)
+                                            .map(payrollTransaction ->
+                                                    normalize(
+                                                            payrollTransaction
+                                                                    .getTxnTypeName()))
+                                            .filter(Objects::nonNull)
+                                            .anyMatch(transactionType ->
+                                                    Objects.equals(
+                                                                    transactionType,
+                                                                    taxType)
+                                                            || Objects.equals(
+                                                                    transactionType,
+                                                                    garnishmentType));
+
+                            /*
+                             * One meaningful diagnostic line.
+                             *
+                             * No employee details / IDs / amounts are dumped.
+                             */
+                            log.info(
+                                    "Rejected payroll eligibility evaluated "
+                                            + "for groupTransactionId: {} - "
+                                            + "employeeCount: {}, "
+                                            + "hasRejectedEmployee: {}, "
+                                            + "allRejectedOrEmployerPaid: {}, "
+                                            + "hasTaxOrGarnishment: {}",
+                                    groupTransactionId,
+                                    employeeTransactions.size(),
+                                    hasRejectedEmployee,
+                                    allRejectedOrEmployerPaid,
+                                    hasTaxOrGarnishment);
+
+                            /*
+                             * Not the NEW scenario.
+                             *
+                             * Do absolutely nothing.
+                             * Existing behavior remains untouched.
+                             */
+                            if (!hasRejectedEmployee
+                                    || !allRejectedOrEmployerPaid
+                                    || hasTaxOrGarnishment) {
+
+                                return;
+                            }
+
+                            /*
+                             * -------------------------------------------------
+                             * FINAL SAFETY CHECK
+                             * -------------------------------------------------
+                             *
+                             * Re-read payroll immediately before updating.
+                             *
+                             * This prevents us from overwriting another status
+                             * change that may have happened while evaluating
+                             * the hierarchy.
+                             */
+                            retrievalService
+                                    .getPayrollBySrcPymtInstrId(
+                                            groupTransactionId,
+                                            procDt)
+                                    .ifPresentOrElse(
+
+                                            latestPayroll -> {
+
+                                                /*
+                                                 * ONLY allow:
+                                                 *
+                                                 * PROCESSED -> REJECTED
+                                                 */
+                                                if (!PayrollStatus.PROCESSED
+                                                        .getCode()
+                                                        .equalsIgnoreCase(
+                                                                latestPayroll
+                                                                        .getPyr1StsCd())) {
+
+                                                    log.info(
+                                                            "Rejected payroll override skipped "
+                                                                    + "for groupTransactionId: {}. "
+                                                                    + "Payroll status changed during "
+                                                                    + "evaluation to: {}",
+                                                            groupTransactionId,
+                                                            latestPayroll
+                                                                    .getPyr1StsCd());
+
+                                                    return;
+                                                }
+
+                                                latestPayroll.setPyr1StsCd(
+                                                        PayrollStatus.REJECTED
+                                                                .getCode());
+
+                                                payrollPersistenceService
+                                                        .saveAndFlushWithAudit(
+                                                                latestPayroll);
+
+                                                log.info(
+                                                        "Payroll status updated from "
+                                                                + "PROCESSED to REJECTED "
+                                                                + "for groupTransactionId: {}. "
+                                                                + "All employee transactions are "
+                                                                + "REJECTED/EMPLOYER_PAID and "
+                                                                + "no TAX or GARNISHMENT is present",
+                                                        groupTransactionId);
+                                            },
+
+                                            () -> log.warn(
+                                                    "Rejected payroll override skipped "
+                                                            + "for groupTransactionId: {}. "
+                                                            + "Payroll was not found during "
+                                                            + "final status update",
+                                                    groupTransactionId));
+                        },
+
+                        () -> log.warn(
+                                "Rejected payroll post-processing skipped "
+                                        + "for groupTransactionId: {}. "
+                                        + "Payroll not found",
+                                groupTransactionId));
+    }
+
+    /**
+     * Normalize transaction type values before comparison.
+     */
+    private String normalize(String value) {
+
+        if (value == null) {
+            return null;
+        }
+
+        return value.trim().toUpperCase(Locale.ROOT);
+    }
+}
