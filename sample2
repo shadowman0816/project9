@@ -1,0 +1,27 @@
+Meeting Title: Payroll Payment Submission & Auto-Cancellation Alignment
+
+Duration: 30 minutes
+Required: Product, Payroll Engineering
+Optional: Other downstream/payment stakeholders as needed
+
+Agenda
+
+The purpose of this session is to align on the expected behavior following payroll/payment submission to downstream systems, specifically around scenarios where we:
+
+* Automatically initiate payroll/customer cancellation
+* Do not initiate cancellation and allow the payroll to remain in its current state
+* Handle downstream failures, rejections, retries, idempotency scenarios, or other terminal/non-terminal responses
+
+Based on some of the scenarios we are seeing in production, there are a few areas where the expected business behavior and system behavior would benefit from clearer alignment.
+
+The goal of this discussion is to:
+
+1. Review the current production behavior and key scenarios.
+2. Confirm with Product when automatic cancellation is expected vs. when it should not occur.
+3. Identify any scenarios that require different handling or additional safeguards.
+4. Document the agreed behavior so Engineering and Product have a common reference going forward.
+5. Identify any follow-up actions or code changes, if required.
+
+I’m scheduling 30 minutes for the initial discussion. Depending on the scenarios we uncover, we can schedule a follow-up working session if needed.
+
+Expected outcome: Clear Product/Engineering agreement and documented rules for when payroll cancellation should and should not be initiated after downstream payment submission.
