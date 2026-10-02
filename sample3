@@ -1,0 +1,514 @@
+@NativeQuery("""
+        SELECT *
+        FROM pyrl_mgmt.pyrl_payee p
+        WHERE p.hire_dt IS NULL
+          AND p.src_payee_id IS NOT NULL
+        ORDER BY p.src_payee_id
+        """)
+List<PayeeEntity> findPayeesWithMissingHireDate();
+
+package net.jpmchase.payroll.recon.service;
+
+public record HireDateBackfillResult(
+        int totalPayees,
+        int batchSize,
+        int totalBatches,
+        int updated,
+        int hireDateMissing,
+        int failed
+) {
+}
+
+package net.jpmchase.payroll.recon.service;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+
+import net.jpmchase.payroll.recon.remote.gusto.EmployeeService;
+import net.jpmchase.payroll.recon.remote.gusto.model.employee.EmployeeResponse;
+import net.jpmchase.payroll.recon.repository.mgmt.payee.PayeeRepository;
+
+// Use your existing imports for these two classes.
+// These are already used by your reconciliation code.
+// import ...EnrollmentEntity;
+// import ...ReconHelperService;
+// import ...PayeeEntity;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionTemplate;
+
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+public class HireDateBackfillService {
+
+    private final PayeeRepository payeeRepository;
+    private final EmployeeService employeeService;
+    private final ReconHelperService reconHelperService;
+    private final PlatformTransactionManager transactionManager;
+
+    @Value("${payroll-app-config.hire-date-backfill.batch-size:10}")
+    private int configuredBatchSize;
+
+    public HireDateBackfillResult backfillHireDates() {
+
+        int batchSize = Math.max(configuredBatchSize, 1);
+
+        log.info(
+                "[HireDateBackfill] Starting hire date backfill. batchSize={}",
+                batchSize
+        );
+
+        /*
+         * IMPORTANT:
+         *
+         * Take the complete snapshot FIRST.
+         *
+         * We do not repeatedly query WHERE hire_dt IS NULL while
+         * modifying hire_dt, because that could cause paging/offset
+         * problems.
+         */
+        List<PayeeEntity> payees =
+                payeeRepository.findPayeesWithMissingHireDate();
+
+        int totalPayees = payees.size();
+
+        if (totalPayees == 0) {
+
+            log.info(
+                    "[HireDateBackfill] No payees found with missing hire date"
+            );
+
+            return new HireDateBackfillResult(
+                    0,
+                    batchSize,
+                    0,
+                    0,
+                    0,
+                    0
+            );
+        }
+
+        int totalBatches =
+                (totalPayees + batchSize - 1) / batchSize;
+
+        log.info(
+                "[HireDateBackfill] Found {} payees with missing hire date. " +
+                "totalBatches={}, batchSize={}",
+                totalPayees,
+                totalBatches,
+                batchSize
+        );
+
+        /*
+         * Load enrollment information once.
+         *
+         * EmployeeService requires enterprisePartyIdentifier.
+         * We already have pyrlEnrlId on PayeeEntity, so use the
+         * existing enrollment helper to resolve enterprise party ID.
+         */
+        Set<String> enrollmentIds = new HashSet<>();
+
+        for (PayeeEntity payee : payees) {
+
+            if (payee.getPyrLEnrlId() != null) {
+                enrollmentIds.add(payee.getPyrLEnrlId());
+            }
+        }
+
+        Map<String, EnrollmentEntity> enrollmentMap =
+                reconHelperService.loadEnrollmentsByEnrlId(
+                        enrollmentIds
+                );
+
+        int totalUpdated = 0;
+        int totalHireDateMissing = 0;
+        int totalFailed = 0;
+
+        for (int start = 0;
+             start < totalPayees;
+             start += batchSize) {
+
+            int end =
+                    Math.min(
+                            start + batchSize,
+                            totalPayees
+                    );
+
+            List<PayeeEntity> batch =
+                    new ArrayList<>(
+                            payees.subList(
+                                    start,
+                                    end
+                            )
+                    );
+
+            int batchNumber =
+                    (start / batchSize) + 1;
+
+            log.info(
+                    "[HireDateBackfill] Starting batch {}/{}. " +
+                    "records={}",
+                    batchNumber,
+                    totalBatches,
+                    batch.size()
+            );
+
+            BatchResult batchResult =
+                    processBatch(
+                            batch,
+                            enrollmentMap,
+                            batchNumber
+                    );
+
+            totalUpdated += batchResult.updated();
+            totalHireDateMissing +=
+                    batchResult.hireDateMissing();
+            totalFailed += batchResult.failed();
+
+            log.info(
+                    "[HireDateBackfill] Completed batch {}/{}. " +
+                    "updated={}, hireDateMissing={}, failed={}",
+                    batchNumber,
+                    totalBatches,
+                    batchResult.updated(),
+                    batchResult.hireDateMissing(),
+                    batchResult.failed()
+            );
+        }
+
+        HireDateBackfillResult result =
+                new HireDateBackfillResult(
+                        totalPayees,
+                        batchSize,
+                        totalBatches,
+                        totalUpdated,
+                        totalHireDateMissing,
+                        totalFailed
+                );
+
+        log.info(
+                "[HireDateBackfill] Completed hire date backfill. " +
+                "totalPayees={}, updated={}, hireDateMissing={}, failed={}",
+                result.totalPayees(),
+                result.updated(),
+                result.hireDateMissing(),
+                result.failed()
+        );
+
+        return result;
+    }
+
+    private BatchResult processBatch(
+            List<PayeeEntity> batch,
+            Map<String, EnrollmentEntity> enrollmentMap,
+            int batchNumber) {
+
+        List<HireDateUpdate> updates =
+                new ArrayList<>();
+
+        int hireDateMissing = 0;
+        int failed = 0;
+
+        /*
+         * API calls happen BEFORE the database transaction.
+         *
+         * This means we don't hold a database transaction open
+         * while waiting for Gusto.
+         */
+        for (PayeeEntity payee : batch) {
+
+            try {
+
+                EnrollmentEntity enrollment =
+                        enrollmentMap.get(
+                                payee.getPyrLEnrlId()
+                        );
+
+                if (enrollment == null) {
+
+                    log.error(
+                            "[HireDateBackfill] Enrollment not found. " +
+                            "srcPayeeId={}, pyrlEnrlId={}",
+                            payee.getSrcPayeeId(),
+                            payee.getPyrLEnrlId()
+                    );
+
+                    failed++;
+                    continue;
+                }
+
+                /*
+                 * EmployeeService from your screenshot:
+                 *
+                 * getEmployee(
+                 *      enterprisePartyIdentifier,
+                 *      employeeId,
+                 *      profileId)
+                 *
+                 * employeeId = srcPayeeId
+                 *
+                 * enterprisePartyIdentifier comes from enrollment.
+                 *
+                 * crePrtyOlPrflId is non-null on PayeeEntity and is
+                 * used as profileId here.
+                 */
+                EmployeeResponse employeeResponse =
+                        employeeService.getEmployee(
+                                enrollment.getRelEntpPrtyId(),
+                                payee.getSrcPayeeId(),
+                                payee.getCrePrtyOlPrflId()
+                        );
+
+                if (employeeResponse == null) {
+
+                    log.warn(
+                            "[HireDateBackfill] Employee response is null. " +
+                            "srcPayeeId={}",
+                            payee.getSrcPayeeId()
+                    );
+
+                    failed++;
+                    continue;
+                }
+
+                /*
+                 * If EmployeeResponse#getHireDate() is already
+                 * LocalDate, this works.
+                 *
+                 * If it is String, that also works.
+                 */
+                LocalDate hireDate =
+                        toLocalDate(
+                                employeeResponse.getHireDate()
+                        );
+
+                if (hireDate == null) {
+
+                    log.warn(
+                            "[HireDateBackfill] Hire date not available " +
+                            "from employee service. srcPayeeId={}",
+                            payee.getSrcPayeeId()
+                    );
+
+                    hireDateMissing++;
+                    continue;
+                }
+
+                updates.add(
+                        new HireDateUpdate(
+                                payee.getSrcPayeeId(),
+                                hireDate
+                        )
+                );
+
+            } catch (Exception e) {
+
+                failed++;
+
+                log.error(
+                        "[HireDateBackfill] Failed retrieving employee. " +
+                        "srcPayeeId={}, pyrlEnrlId={}, batch={}",
+                        payee.getSrcPayeeId(),
+                        payee.getPyrLEnrlId(),
+                        batchNumber,
+                        e
+                );
+            }
+        }
+
+        /*
+         * Now commit all successful employees from THIS batch
+         * in one transaction.
+         *
+         * For batch size 10:
+         *
+         * API call
+         * API call
+         * ...
+         * API call
+         *
+         * DB transaction begins
+         * update successful records
+         * COMMIT
+         */
+        int updated =
+                commitBatch(updates);
+
+        return new BatchResult(
+                updated,
+                hireDateMissing,
+                failed
+        );
+    }
+
+    private int commitBatch(
+            List<HireDateUpdate> updates) {
+
+        if (updates.isEmpty()) {
+            return 0;
+        }
+
+        TransactionTemplate transactionTemplate =
+                new TransactionTemplate(
+                        transactionManager
+                );
+
+        /*
+         * Explicitly force a new transaction for every group
+         * of 10.
+         */
+        transactionTemplate.setPropagationBehavior(
+                TransactionDefinition.PROPAGATION_REQUIRES_NEW
+        );
+
+        Integer updated =
+                transactionTemplate.execute(status -> {
+
+                    List<PayeeEntity> payeesToUpdate =
+                            new ArrayList<>();
+
+                    for (HireDateUpdate update : updates) {
+
+                        PayeeEntity payee =
+                                payeeRepository
+                                        .findById(
+                                                update.srcPayeeId()
+                                        )
+                                        .orElse(null);
+
+                        if (payee == null) {
+
+                            log.warn(
+                                    "[HireDateBackfill] Payee no longer exists. " +
+                                    "srcPayeeId={}",
+                                    update.srcPayeeId()
+                            );
+
+                            continue;
+                        }
+
+                        /*
+                         * Important idempotency protection.
+                         *
+                         * If normal processing/webhook populated the
+                         * hire date while this backfill was running,
+                         * leave that value alone.
+                         */
+                        if (payee.getHireDt() != null) {
+
+                            log.debug(
+                                    "[HireDateBackfill] Hire date already populated. " +
+                                    "Skipping srcPayeeId={}",
+                                    update.srcPayeeId()
+                            );
+
+                            continue;
+                        }
+
+                        payee.setHireDt(
+                                update.hireDate()
+                        );
+
+                        payeesToUpdate.add(payee);
+                    }
+
+                    if (payeesToUpdate.isEmpty()) {
+                        return 0;
+                    }
+
+                    /*
+                     * @PreUpdate on PayeeEntity will update updtTs.
+                     */
+                    payeeRepository.saveAll(
+                            payeesToUpdate
+                    );
+
+                    /*
+                     * Force SQL execution inside this transaction.
+                     */
+                    payeeRepository.flush();
+
+                    return payeesToUpdate.size();
+                });
+
+        return updated == null
+                ? 0
+                : updated;
+    }
+
+    private LocalDate toLocalDate(
+            Object value) {
+
+        if (value == null) {
+            return null;
+        }
+
+        if (value instanceof LocalDate localDate) {
+            return localDate;
+        }
+
+        if (value instanceof LocalDateTime localDateTime) {
+            return localDateTime.toLocalDate();
+        }
+
+        if (value instanceof OffsetDateTime offsetDateTime) {
+            return offsetDateTime.toLocalDate();
+        }
+
+        if (value instanceof String stringValue) {
+
+            if (stringValue.isBlank()) {
+                return null;
+            }
+
+            return LocalDate.parse(
+                    stringValue.trim()
+            );
+        }
+
+        throw new IllegalArgumentException(
+                "Unsupported hire date type: " +
+                value.getClass().getName()
+        );
+    }
+
+    private record HireDateUpdate(
+            String srcPayeeId,
+            LocalDate hireDate) {
+    }
+
+    private record BatchResult(
+            int updated,
+            int hireDateMissing,
+            int failed) {
+    }
+}
+
+@PatchMapping("/backfill-hire-dates")
+public ResponseEntity<HireDateBackfillResult> backfillHireDates() {
+
+    log.info(
+            "Manual hire date backfill requested"
+    );
+
+    HireDateBackfillResult result =
+            hireDateBackfillService.backfillHireDates();
+
+    return ResponseEntity.ok(result);
+}
+
+
+
