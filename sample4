@@ -1,0 +1,19 @@
+Hi Team,
+
+We identified a difference in the SBB status-update sequence across two payroll examples. The expected sequence is PENDING_REVIEW → PENDING. In the affected example, two PENDING_REVIEW messages arrived after PENDING for the same PIM identifier. The comparison example followed the expected sequence.
+
+This unexpected ordering affected payroll status processing and led us to roll back our recent changes, as we initially believed the new changes were responsible. The evidence now points to status-message ordering as a potential cause, which we need to confirm through an end-to-end trace.
+
+The issue occurred around 9:30 PM. As far as we know, there were no SBB deployments around that time.
+
+Could the SBB and messaging teams review both examples and confirm:
+
+* The order and timestamps in which the statuses were generated, published, received, and processed.
+* Whether the two PENDING_REVIEW messages were distinct events, retries, or duplicate deliveries.
+* Whether ordering is guaranteed for the same PIM identifier, and whether any delays, replay, or concurrent processing occurred.
+* Whether any configuration changes or operational issues occurred around the incident time, despite no known deployment.
+
+Please help establish the root cause and the expected handling of late status updates so we can agree on a fix and prevent recurrence.
+
+Thanks,
+Kasi
