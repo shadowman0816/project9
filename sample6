@@ -5,4 +5,14 @@ For Chase’s processed payroll and off-cycle payroll integration, please confir
 3. For partner_owned_disbursement, what are the authoritative employee payment and employer funding fields? How should we interpret check_amount when payment_method is Direct Deposit?
 4. When a rejected direct deposit is converted to check, does Gusto change only the disbursement method, or can it recalculate wages, adjustments, taxes, or debit totals? Which amounts and version should Chase use after conversion?
 5. Can OB3 recalculation or year-end redistribution change an already processed payroll’s financial totals? If so, how are partners notified, and how should existing employee payments and tax-account postings be reconciled?
-6. Which API version removes compensation_multiplier, and what should replace any existing dependency on it?
+6. Hi all,
+
+The initial OB3 impact assessment is in progress. I have not identified pay_adjustments in the application JSONs reviewed so far and will also check the Processor Service mappings and payment amount handling.
+
+We will wait for Mukta’s current regression testing to complete before coordinating with Gusto to enable OB3 in demo and arrange a walkthrough. We will then validate the payroll prepare, update, calculate, and submit flows, including any impact on downstream payment and funding amounts.
+
+I will capture the findings and validation steps in BATVAS-801 and share the outcome before recommending production enablement.
+
+Thanks,
+Kasi
+Which API version removes compensation_multiplier, and what should replace any existing dependency on it?
