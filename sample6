@@ -1,0 +1,8 @@
+For Chase’s processed payroll and off-cycle payroll integration, please confirm:
+
+1. When pay_adjustments is returned, is it already included in employee gross_pay, net_pay, and check_amount, and in payroll-level tax, funding, and debit totals? Does Chase need any separate monetary handling?
+2. Can pay_adjustments appear on off-cycle payrolls, including termination payrolls, when Chase continues submitting totals without workweek breakdowns?
+3. For partner_owned_disbursement, what are the authoritative employee payment and employer funding fields? How should we interpret check_amount when payment_method is Direct Deposit?
+4. When a rejected direct deposit is converted to check, does Gusto change only the disbursement method, or can it recalculate wages, adjustments, taxes, or debit totals? Which amounts and version should Chase use after conversion?
+5. Can OB3 recalculation or year-end redistribution change an already processed payroll’s financial totals? If so, how are partners notified, and how should existing employee payments and tax-account postings be reconciled?
+6. Which API version removes compensation_multiplier, and what should replace any existing dependency on it?
