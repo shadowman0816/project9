@@ -1,0 +1,268 @@
+Payroll Payment Submission — Retry and Automatic Cancellation Rules
+
+Purpose
+
+This document defines the expected Product and Engineering behavior when payroll processing or downstream payment submission encounters a failure.
+
+The objective is to establish a consistent rule for:
+
+* When a payroll should be automatically canceled.
+* When a payroll should remain active while recovery/retry occurs.
+* When downstream payment status must be reconciled before taking customer-facing action.
+* How cutoff time affects retry and cancellation behavior.
+* How cancellation should propagate across PIM and Gusto.
+
+⸻
+
+Guiding Principle
+
+Automatic cancellation should be based on the certainty of the business outcome, not simply on the fact that an error occurred.
+
+Definitive failure
+
+If we know that the payroll/payment cannot proceed because of a non-recoverable business or validation condition, we can initiate automatic cancellation.
+
+Examples may include:
+
+* Eligibility failure
+* Limit failure
+* Required data unavailable
+* Invalid payroll/payment data
+* Other non-recoverable business validation failures
+
+Recoverable or uncertain failure
+
+If the failure is caused by infrastructure, availability, timeout, throttling, authentication, or another condition where the downstream processing outcome is uncertain, the customer’s payroll should not be immediately canceled.
+
+The system should first attempt recovery, retry, or reconciliation.
+
+This distinction is especially important once payment submission has reached PIM/SBP because downstream processing or money movement may already have started.
+
+⸻
+
+Scenario 1 — Failure Before PIM Payment Submission
+
+This represents failures occurring before the payroll reaches the downstream payment-submission boundary.
+
+Examples:
+
+* Payroll validation failure
+* Eligibility failure
+* Payment limit failure
+* Required data unavailable
+* Non-recoverable request validation
+* Other conditions where we know the payroll cannot be successfully submitted
+
+Proposed behavior
+
+If the failure is definitive and non-recoverable:
+
+Payroll → Automatic Cancellation
+
+The customer is subsequently notified of the cancellation through the existing customer-notification process.
+
+There is no benefit in preserving or repeatedly retrying a payroll when we already know the business condition prevents it from proceeding.
+
+⸻
+
+Scenario 2 — PIM/SBP Submission Failure Before Cutoff
+
+Once payroll processing reaches PIM/SBP, the behavior changes.
+
+At this point, we need to account for the possibility that:
+
+* The request reached downstream.
+* Downstream accepted the request but has not completed processing.
+* Downstream processed the request but our response was lost.
+* Downstream is temporarily unavailable.
+* A duplicate/idempotency response indicates an earlier submission already exists.
+
+Therefore, a technical failure at this stage should not automatically be interpreted as a business rejection.
+
+Proposed behavior
+
+For recoverable downstream failures:
+
+PIM/SBP Failure
+→ Soft/Recoverable State
+→ Retry
+→ Retry
+→ Retry
+→ Success OR Retry Exhaustion
+
+If a subsequent retry succeeds:
+
+Continue normal payroll processing.
+
+If the configured retries are exhausted and we have confirmed that processing cannot continue:
+
+Initiate cancellation workflow.
+
+⸻
+
+Cancellation Sequence After Retry Exhaustion
+
+When cancellation is required after downstream submission:
+
+Step 1 — Cancel in PIM
+
+PIM cancellation should occur first because PIM represents the downstream payment-processing state.
+
+Step 2 — Cancel in Gusto
+
+Only after downstream cancellation has been successfully established should the corresponding Gusto payroll cancellation be initiated.
+
+Therefore:
+
+Cancel PIM → Confirm PIM cancellation → Cancel Gusto
+
+This sequencing reduces the risk of informing the payroll/customer-facing system that payroll is canceled while downstream payment processing remains active.
+
+⸻
+
+PIM Cancellation Failure
+
+If PIM cancellation fails:
+
+The payroll should move into a defined cancellation-failure state rather than proceeding as though cancellation succeeded.
+
+Example:
+
+CANCEL_IN_PROGRESS → CANCEL_FAILED
+
+The payroll should not be marked successfully canceled in Gusto while downstream payment cancellation remains unresolved.
+
+Longer-term handling for these scenarios can be addressed through the planned cancellation synchronization/reconciliation capability.
+
+⸻
+
+Scenario 3 — Failure After Cutoff
+
+The third scenario occurs after the configured daily cutoff — currently approximately 6:00 PM.
+
+Before cutoff, technical downstream failures can use the normal soft/retry strategy.
+
+After cutoff, continuing repeated retries may no longer be appropriate because the payroll cannot safely proceed within the processing window.
+
+Proposed behavior
+
+After cutoff:
+
+Do not continue normal soft retries.
+
+However, this does not necessarily mean instantaneous cancellation.
+
+Instead:
+
+Failure after cutoff
+→ Short delayed-cancellation window
+→ Confirm/reconcile downstream state
+→ Initiate cancellation
+
+For example, cancellation may be deferred approximately 10 minutes rather than happening immediately.
+
+The purpose of the delay is to protect against temporarily unavailable downstream systems or an uncertain payment-submission result.
+
+⸻
+
+HTTP Response Classification
+
+HTTP Status	Meaning	Expected Processing
+200	Successfully processed	Continue payroll
+202	Request accepted but processing not completed	Preserve payroll; wait/reconcile
+400	Request validation failure	Do not retry; cancel if failure is definitively non-recoverable
+401	Authentication failure	Treat as technical/platform issue; recover credentials before retry
+403	Authorization failure	Treat as configuration/platform issue; investigate/remediate
+409	Duplicate payment detected	Do not cancel; reconcile existing downstream payment
+422	Idempotency validation/conflict	Do not blindly retry or cancel; reconcile existing submission
+429	Rate limit exceeded	Retry according to retry policy
+500	Unexpected downstream/system error	Retry according to retry policy
+503	Service temporarily unavailable	Retry according to retry policy
+504	Gateway/downstream timeout	Retry/reconcile carefully because processing status may be uncertain
+
+⸻
+
+Important Distinction: Retryability vs. Cancellation
+
+A response being non-retryable does not automatically mean that the payroll should be auto-canceled.
+
+These are two different decisions.
+
+For example:
+
+409 — Duplicate Payment
+
+We may not want to retry the request because the downstream system is telling us that the payment already exists.
+
+However, canceling the payroll would also be incorrect because the original payment may already be processing.
+
+The appropriate action is:
+
+Reconcile existing payment → Determine actual downstream status → Continue or cancel based on confirmed status.
+
+The same principle applies to idempotency-related responses.
+
+⸻
+
+Customer Impact Principle
+
+Before issuing a customer-facing cancellation, we should be able to answer:
+
+Are we certain that this payroll/payment will not execute?
+
+If yes, cancellation is appropriate.
+
+If no, the payroll should remain under system recovery or reconciliation until downstream state is understood.
+
+This prevents scenarios where:
+
+* Customer receives a payroll-canceled notification.
+* Gusto reflects the payroll as canceled.
+* But PIM/SBP has already accepted or processed the payment.
+
+⸻
+
+Proposed Decision Matrix
+
+Condition	Before PIM	After PIM / Before Cutoff	After Cutoff
+Definitive business rejection	Auto-cancel	Auto-cancel if downstream state is known	Auto-cancel
+Validation failure	Auto-cancel	Based on downstream acceptance state	Cancel
+Temporary downstream outage	N/A / existing handling	Soft + retry	Delayed cancellation
+Rate limiting	N/A	Retry	Delayed cancellation/reconcile
+Timeout	N/A	Retry + reconcile	Reconcile before cancellation
+Duplicate/idempotency response	N/A	Reconcile	Reconcile before cancellation
+Retry exhaustion	N/A	Cancel PIM → Gusto	Cancel PIM → Gusto
+PIM cancellation failure	N/A	CANCEL_FAILED	CANCEL_FAILED
+
+⸻
+
+Decisions Required From Product
+
+The meeting should provide explicit agreement on the following:
+
+1. Which business failures allow immediate customer-facing automatic cancellation?
+2. Once payment submission reaches PIM, should technical failures ever immediately cancel the payroll?
+3. Should 409/422 idempotency or duplicate-payment responses always require reconciliation rather than cancellation?
+4. Should 401/403 be treated as platform/configuration failures rather than customer payroll failures?
+5. At retry exhaustion, do we agree that cancellation sequencing should be PIM first and Gusto second?
+6. If PIM cancellation fails, do we agree that Gusto should not be canceled until downstream cancellation is resolved?
+7. After the cutoff, what is the acceptable delayed-cancellation/reconciliation window?
+8. What customer notification should occur while payroll is in recovery versus after cancellation is confirmed?
+
+⸻
+
+Expected Outcome
+
+At the conclusion of the discussion, Product and Engineering should have a documented agreement covering:
+
+Definitive failure → Auto-cancel
+
+Recoverable technical failure → Retry/recover
+
+Uncertain downstream state → Reconcile
+
+Retry exhausted / confirmed non-processable → Cancel PIM → Cancel Gusto
+
+Unable to cancel downstream → Cancellation-failure/reconciliation workflow
+
+This documented behavior will become the common reference for future implementation changes, production incidents, and customer-impact decisions.
