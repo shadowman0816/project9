@@ -1,0 +1,1 @@
+Kafka resiliency testing is underway to validate surge capacity and determine whether additional Kafka partitions are required. Testing and the resulting surge capacity recommendations will be finalized by November 15, 2026.
