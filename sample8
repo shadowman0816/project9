@@ -1,0 +1,46 @@
+Personal record of deployment discussion
+
+Prepared: October 22, 2026
+
+Incident date: October 21, 2026, based on my recollection that this occurred yesterday; confirm against the meeting invitation.
+
+Start time: Approximately 8:00 PM. Subsequent times are approximate.
+
+Participants: Myself (Kasi), Juliana Muscach, Tara, Razi, and Noah.
+
+This is my recollection of the events. Quoted phrases reflect the wording I remember and are not a verbatim transcript. Exact timestamps and technical actions can be checked against the meeting, chat, and deployment records.
+
+Timeline
+
+1. Deployment walkthrough and confirmation. We started at approximately 8:00 PM with all five participants present. I shared my screen and walked through the configuration items and identifiers that needed to be copied for the deployment. I obtained confirmation before triggering it.
+2. Screen-sharing discussion. I recall Juliana asking Razi and me to share our screens, while telling Tara words to the effect of “you know what to do.” I also recall Juliana saying “don’t give this face” to me. I did not respond to that comment and continued with my work.
+3. Recon and production testing. I asked Juliana to start reconciliation, which I understood to be part of the initial testing. I wanted to validate my changes in production after deployment.
+4. Cleanup and Blue discussion. When I asked whether I was still needed, the discussion turned to cleanup, including the East region and tearing down Blue. I recall triggering an action during this part of the discussion. The exact action and region sequence should be checked against the deployment logs rather than reconstructed from memory.
+5. Existing processor configuration and West. Keeping the processor’s Blue deployment available with capacity at zero was the existing setup from previous deployments. My intention was to use the same approach in West. Tara asked why Blue needed to be torn down. I explained my concern about retaining an option to go back if there was a regional outage or an issue with the deployed code. I recall Juliana wanting the capacity changed to one. We disagreed about the intended configuration and cleanup approach.
+6. Request to discuss the approach the following day. I explained that I had been working repeated late nights and suggested discussing and finalizing the approach in a meeting the next day. I recall Juliana responding with words to the effect of “don’t do that” and “everybody is working.” There was a back-and-forth. I recall responding “you are doing that to me” or similar words, but I do not remember the complete exchange precisely.
+7. Continued work and validation. I continued working on my deployment and waited for the other deployment to complete so that I could test. I directed my validation requests to Tara and repeatedly asked the group to verify that everything was good. I also requested screenshots. I signed off only after the requested validation was completed. The specific checks and timestamps can be confirmed from the deployment records and messages.
+8. Processor capacity and sign-off. I set the processor capacity to zero, consistent with the existing setup described above. My intention was to retain Blue deployed at zero capacity rather than remove it. After validation was completed, I said words to the effect of “Guys, I’m done with deployment. I am signing off,” and left the call.
+9. Questions after I left. Juliana then questioned the change in the shared chat and asked why I had done it. I responded with words to the effect of “Why is this confusion? Let me join back,” and rejoined to discuss it.
+10. Recon and job-running evidence. Around this follow-up, I also checked that recon had completed and provided a logging link showing the jobs running. The exact timing and link can be confirmed from the chat history.
+11. Exchange on the rejoined call. During the discussion about rollback and the Blue configuration, Juliana raised her voice and repeatedly asked me to answer a question. I experienced the tone and some of the comments as disrespectful. I said, “We are all adults here.” I recall Juliana responding repeatedly with words to the effect of “I’m a child.” I then understood that Juliana had removed me from the call.
+12. Later offer to talk. Approximately two hours later, around midnight as I recall, I saw Juliana online and sent a message along the lines of “I’m back now. Just back home. Let me know if you wanted to talk.” I had not received a response when I first recorded this account.
+
+Context
+
+My intention was to complete the deployment, obtain validation, and sign off. I was tired from repeated late-night work and wanted the disagreement about the configuration to be resolved in a separate discussion. I returned when questions were raised after I left and later offered to talk again.
+
+This record describes what I recall happening. I do not know whether any complaint has been made, and I am not making a claim about anyone’s intentions.
+
+Supporting records to reference
+
+• Meeting invitation and attendee list, including the exact date and name spellings.
+• Deployment history showing the prior processor setup and the actions taken in East and West.
+• Configuration and capacity settings before and after the deployment.
+• Messages, validation results, screenshots, and the job-running evidence link.
+• Timestamps for my sign-off, return, and later offer to talk.
+
+Original company records should remain in approved company systems.
+
+Revision note
+
+Updated October 22, 2026, to include the complete attendee list and my clarification that zero capacity was the existing processor configuration and that I signed off after validation was completed. Rewritten in the first person on the same date. Exact technical details and timestamps remain subject to checking against the original records.
