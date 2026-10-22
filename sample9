@@ -1,1 +1,5 @@
+
+Hi Neeraja, I’ve added a comment in the deck for VAS Payments noting that Kafka resiliency testing is underway to validate surge capacity and determine whether additional partitions are needed, with completion targeted for November 15. Could you please confirm you’re comfortable with the wording and timeline?
+
+
 Kafka resiliency testing is underway to validate surge capacity and determine whether additional Kafka partitions are required. Testing and the resulting surge capacity recommendations will be finalized by November 15, 2026.
